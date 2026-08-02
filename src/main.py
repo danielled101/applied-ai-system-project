@@ -9,11 +9,24 @@ You will implement the functions in recommender.py:
 - recommend_songs
 """
 
-from recommender import load_songs, recommend_songs
+import logging
+import os
+
+from src.recommender import load_songs, recommend_songs
+
+
+def configure_logging() -> None:
+    os.makedirs("logs", exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler("logs/app.log")],
+    )
 
 
 def main() -> None:
-    songs = load_songs("data/songs.csv") 
+    configure_logging()
+    songs = load_songs("data/songs.csv")
 
     # Starter example profile
     user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.8}

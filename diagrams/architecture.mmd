@@ -1,0 +1,46 @@
+flowchart TD
+    subgraph Input
+        A["data/songs.csv"]
+        B["UserProfile<br/>favorite_genre, favorite_mood,<br/>target_energy, likes_acoustic"]
+    end
+
+    subgraph DataLayer["Data Layer"]
+        C["load_songs()"]
+        A --> C
+    end
+
+    subgraph Engine["Scoring Engine"]
+        D["score_song()<br/>scores each song vs. UserProfile,<br/>returns score + matched reasons"]
+        E["Retriever<br/>retrieve_similar_songs()<br/>finds nearest catalog neighbors<br/>by audio attributes"]
+        C --> D
+        B --> D
+        D --> E
+    end
+
+    subgraph Agent["Generation Agent (RAG)"]
+        F["generate_explanation()<br/>Gemini, grounded ONLY in<br/>retrieved reasons + neighbors"]
+        G{"Guardrail / Evaluator<br/>API key present?<br/>call succeeded?<br/>response non-empty?"}
+        E --> F --> G
+        G -- "no / fails" --> H["Fallback template<br/>(deterministic, same facts)"]
+        G -- "yes" --> I["Grounded explanation"]
+    end
+
+    subgraph Output
+        J["Ranked Top-k Recommendations<br/>(song, score, explanation)"]
+        H --> J
+        I --> J
+    end
+
+    subgraph HumanCheck["Human & Automated Testing"]
+        K["pytest suite<br/>tests/test_recommender.py<br/>checks scoring order + explanation validity"]
+        L["Developer review<br/>runs CLI, reads logs/app.log,<br/>judges explanation quality"]
+    end
+
+    K -. validates .-> D
+    K -. validates .-> Agent
+    J --> L
+    L -. flags issues back to .-> D
+
+    M["src/main.py<br/>CLI entry point"] --> C
+    M --> Engine
+    J --> M
