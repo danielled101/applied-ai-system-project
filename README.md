@@ -163,8 +163,47 @@ Gym Hero by Max Pulse (score 2.47)
   We recommended "Gym Hero" by Max Pulse because its intense mood matches your preferred mood. Additionally, its energy level of 0.93 is very close to your target energy of 0.90!
 ```
 
-Note every explanation only references attributes that are actually in the
-catalog data — no invented artists, genres, or stats.
+Note every explanation only references attributes that are actually in the catalog data — no invented artists, genres, or stats.
+
+### Guardrail in action: no API key
+
+This is a real run with `GEMINI_API_KEY` unset — the log lines show the guardrail detecting the missing key and switching to the deterministic fallback *before* it ever tries to call Gemini, and the app still produces a complete, valid result instead of crashing:
+
+**Input:** `{genre: lofi, mood: chill, energy: 0.3, likes_acoustic: true}`
+```
+INFO src.recommender: Loading songs from data/songs.csv
+INFO src.recommender: Loaded 10 songs
+WARNING src.recommender: GEMINI_API_KEY not set; using template explanation instead of RAG generation
+WARNING src.recommender: GEMINI_API_KEY not set; using template explanation instead of RAG generation
+
+Library Rain - Score: 5.20
+Because: We recommended "Library Rain" by Paper Lanterns because its genre (lofi) matches your favorite genre; its mood (chill) matches your preferred mood; its energy (0.35) is close to your target energy (0.30); its high acousticness (0.86) fits your taste for acoustic sound. It also has a similar sound profile to "Focus Flow" by LoRoom, "Coffee Shop Stories" by Slow Stereo already in the catalog.
+
+Midnight Coding - Score: 5.13
+Because: We recommended "Midnight Coding" by LoRoom because its genre (lofi) matches your favorite genre; its mood (chill) matches your preferred mood; its energy (0.42) is close to your target energy (0.30); its high acousticness (0.71) fits your taste for acoustic sound. It also has a similar sound profile to "Focus Flow" by LoRoom, "Library Rain" by Paper Lanterns already in the catalog.
+```
+
+### Guardrail in action: automated test suite
+
+```
+$ pytest -v
+collected 12 items
+
+tests/test_recommender.py::test_recommend_returns_songs_sorted_by_score PASSED [  8%]
+tests/test_recommender.py::test_explain_recommendation_returns_non_empty_string PASSED [ 16%]
+tests/test_recommender.py::test_score_song_gives_reasons_for_each_match PASSED [ 25%]
+tests/test_recommender.py::test_score_song_no_match_still_returns_a_reason PASSED [ 33%]
+tests/test_recommender.py::test_retrieve_similar_songs_excludes_target_and_respects_top_n PASSED [ 41%]
+tests/test_recommender.py::test_recommend_songs_returns_k_results_sorted_by_score PASSED [ 50%]
+tests/test_recommender.py::test_recommend_songs_handles_empty_catalog_without_crashing PASSED [ 58%]
+tests/test_recommender.py::test_generate_explanation_falls_back_without_api_key PASSED [ 66%]
+tests/test_recommender.py::test_fallback_parse_request_maps_synonyms_not_in_catalog_vocabulary PASSED [ 75%]
+tests/test_recommender.py::test_fallback_parse_request_only_ever_returns_catalog_values PASSED [ 83%]
+tests/test_recommender.py::test_parse_user_request_falls_back_without_api_key PASSED [ 91%]
+tests/test_recommender.py::test_generate_explanation_falls_back_when_api_call_fails PASSED [100%]
+
+============================= 12 passed in 8.38s ==============================
+```
 
 ---
 
@@ -237,10 +276,7 @@ itself is down, not just when a key was never configured.
 
 ### Human evaluation (groundedness check)
 
-Automated tests can check that *something* came back, but not whether an
-LLM-generated explanation is telling the truth about the catalog. I manually
-checked each real Gemini output (the four samples above) against the actual
-CSV data:
+Automated tests can check that *something* came back, but not whether an LLM-generated explanation is telling the truth about the catalog. I manually checked each real Gemini output (the four samples above) against the actual CSV data:
 
 | Test Input | Evaluation Criteria | Result |
 |---|---|---|
@@ -253,13 +289,8 @@ CSV data:
 
 **What didn't work initially:**
 - My first Anthropic API key had no billing credit, so every call failed — looked like a connection error at first, but tracing it down showed it was a billing/credit issue, not a code bug.
-- The starter's `src/main.py` imported `recommender` as a bare top-level
-  module, which breaks under the README's own documented invocation
-  (`python -m src.main`). Fixed to `from src.recommender import ...`.
-- My Gemini key's free tier returned `429 RESOURCE_EXHAUSTED` (quota limit
-  0) for `gemini-2.0-flash`; listing available models and testing a few
-  showed `gemini-flash-lite-latest` had quota available, so that became the
-  default model.
+- The starter's `src/main.py` imported `recommender` as a bare top-level module, which breaks under the README's own documented invocation (`python -m src.main`). Fixed to `from src.recommender import ...`.
+- My Gemini key's free tier returned `429 RESOURCE_EXHAUSTED` (quota limit 0) for `gemini-2.0-flash`; listing available models and testing a few showed `gemini-flash-lite-latest` had quota available, so that became the default model.
 
 **What I learned:** most of the "AI is broken" symptoms I hit during this project were actually infrastructure problems (billing, quotas, TLS/certificates) rather than logic bugs — the lesson was to isolate each layer (network reachability, auth, quota, then app logic) instead of assuming the first error message is the root cause.
 
@@ -268,13 +299,6 @@ CSV data:
 ## Reflection
 
 Read [`model_card.md`](model_card.md) for the graded responsible-AI
-reflection — how I collaborated with AI on this project, one AI suggestion
-that helped and one that was flawed, and this system's limitations.
+reflection — how I collaborated with AI on this project, one AI suggestion that helped and one that was flawed, and this system's limitations.
 
-Beyond that: building the retrieval step made concrete something I'd only
-understood abstractly before — that "grounding" isn't a checkbox, it's a
-design constraint that shapes the prompt, the guardrails, and the fallback
-path all at once. It also reinforced that a recommender's scoring rule
-*is* its opinion about what matters (genre match weighted more than
-acousticness, here), and that opinion is exactly where bias would creep in
-if this were a real product instead of a 10-song classroom catalog.
+Beyond that: building the retrieval step made concrete something I'd only understood abstractly before — that "grounding" isn't a checkbox, it's a design constraint that shapes the prompt, the guardrails, and the fallback path all at once. It also reinforced that a recommender's scoring rule *is* its opinion about what matters (genre match weighted more than acousticness, here), and that opinion is exactly where bias would creep in if this were a real product instead of a 10-song classroom catalog.
