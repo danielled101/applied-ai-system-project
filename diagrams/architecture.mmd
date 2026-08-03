@@ -1,7 +1,8 @@
 flowchart TD
     subgraph Input
         A["data/songs.csv"]
-        B["UserProfile<br/>favorite_genre, favorite_mood,<br/>target_energy, likes_acoustic"]
+        B["Free-text request<br/>e.g. 'I want calm music<br/>for studying'"]
+        B2["Structured Q&A<br/>(genre/mood/energy/acoustic)<br/>if no free text given"]
     end
 
     subgraph DataLayer["Data Layer"]
@@ -9,11 +10,21 @@ flowchart TD
         A --> C
     end
 
+    subgraph Parser["NL Parser (RAG)"]
+        P["parse_user_request()<br/>Gemini, grounded ONLY in the<br/>catalog's real genre/mood vocabulary"]
+        PG{"Guardrail<br/>API key present?<br/>call succeeded?<br/>valid JSON?"}
+        B --> P --> PG
+        PG -- "no / fails" --> PF["Keyword + synonym<br/>fallback parser"]
+        PG -- "yes" --> PS["Structured prefs<br/>(genre, mood, energy, likes_acoustic)"]
+        PF --> PS
+        B2 --> PS
+    end
+
     subgraph Engine["Scoring Engine"]
-        D["score_song()<br/>scores each song vs. UserProfile,<br/>returns score + matched reasons"]
+        D["score_song()<br/>scores each song vs. prefs,<br/>returns score + matched reasons"]
         E["Retriever<br/>retrieve_similar_songs()<br/>finds nearest catalog neighbors<br/>by audio attributes"]
         C --> D
-        B --> D
+        PS --> D
         D --> E
     end
 
@@ -32,15 +43,16 @@ flowchart TD
     end
 
     subgraph HumanCheck["Human & Automated Testing"]
-        K["pytest suite<br/>tests/test_recommender.py<br/>checks scoring order + explanation validity"]
-        L["Developer review<br/>runs CLI, reads logs/app.log,<br/>judges explanation quality"]
+        K["pytest suite<br/>tests/test_recommender.py<br/>checks scoring, parsing + explanation validity"]
+        L["Developer review<br/>runs CLI, reads logs/app.log,<br/>judges output quality"]
     end
 
+    K -. validates .-> Parser
     K -. validates .-> D
     K -. validates .-> Agent
     J --> L
     L -. flags issues back to .-> D
 
     M["src/main.py<br/>CLI entry point"] --> C
-    M --> Engine
+    M --> Parser
     J --> M

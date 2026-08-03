@@ -1,18 +1,15 @@
 """
 Command line runner for the Music Recommender Simulation.
-
-This file helps you quickly run and test your recommender.
-
-You will implement the functions in recommender.py:
-- load_songs
-- score_song
-- recommend_songs
 """
 
 import logging
 import os
 
-from src.recommender import load_songs, recommend_songs
+from src.recommender import load_songs, recommend_songs, parse_user_request
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_PROFILE = {"genre": "pop", "mood": "happy", "energy": 0.8}
 
 
 def configure_logging() -> None:
@@ -24,12 +21,45 @@ def configure_logging() -> None:
     )
 
 
+def prompt_user_profile(songs) -> dict:
+    genres = sorted({s["genre"] for s in songs})
+    moods = sorted({s["mood"] for s in songs})
+    print(f"Available genres: {', '.join(genres)}")
+    print(f"Available moods:  {', '.join(moods)}\n")
+
+    genre = input("Favorite genre: ").strip().lower()
+    mood = input("Favorite mood: ").strip().lower()
+
+    energy = 0.5
+    energy_raw = input("Target energy, 0.0 (calm) to 1.0 (intense): ").strip()
+    try:
+        energy = max(0.0, min(1.0, float(energy_raw)))
+    except ValueError:
+        print(f"Couldn't parse '{energy_raw}' as a number, defaulting energy to 0.5.")
+
+    acoustic_raw = input("Do you like acoustic sound? (y/n): ").strip().lower()
+    likes_acoustic = acoustic_raw.startswith("y")
+
+    return {"genre": genre, "mood": mood, "energy": energy, "likes_acoustic": likes_acoustic}
+
+
 def main() -> None:
     configure_logging()
     songs = load_songs("data/songs.csv")
 
-    # Starter example profile
-    user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.8}
+    try:
+        request_text = input(
+            "Describe what you're in the mood for (e.g. 'I want calm music for "
+            "studying'), or press Enter to answer a few questions instead: "
+        ).strip()
+        if request_text:
+            user_prefs = parse_user_request(request_text, songs)
+            print(f"\nGot it - interpreting that as: {user_prefs}\n")
+        else:
+            user_prefs = prompt_user_profile(songs)
+    except EOFError:
+        logger.warning("No interactive input available; using the default demo profile")
+        user_prefs = DEFAULT_PROFILE
 
     recommendations = recommend_songs(user_prefs, songs, k=5)
 

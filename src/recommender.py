@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from dataclasses import dataclass, asdict
@@ -19,6 +20,24 @@ REQUIRED_COLUMNS = {
 }
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
+
+# Used by the keyword-based fallback parser when no LLM is available:
+# maps everyday words to the catalog's actual mood vocabulary.
+MOOD_SYNONYMS = {
+    "calm": "relaxed", "calming": "relaxed", "peaceful": "relaxed", "soothing": "relaxed",
+    "mellow": "relaxed", "unwind": "relaxed", "wind down": "relaxed",
+    "study": "focused", "studying": "focused", "focus": "focused", "concentration": "focused",
+    "work": "focused", "working": "focused", "productive": "focused",
+    "sad": "moody", "melancholy": "moody", "dark": "moody", "brooding": "moody",
+    "energetic": "intense", "hype": "intense", "pumped": "intense", "workout": "intense",
+    "gym": "intense", "aggressive": "intense",
+    "upbeat": "happy", "joyful": "happy", "cheerful": "happy", "fun": "happy",
+    "chilled": "chill", "chilled out": "chill", "laid-back": "chill", "laid back": "chill",
+    "lounging": "chill", "lazy": "chill",
+}
+
+LOW_ENERGY_WORDS = ["calm", "chill", "relax", "study", "studying", "slow", "quiet", "peaceful", "mellow", "sleepy"]
+HIGH_ENERGY_WORDS = ["energetic", "hype", "workout", "gym", "intense", "party", "pump", "fast", "upbeat", "aggressive"]
 
 
 @dataclass
@@ -172,6 +191,130 @@ def retrieve_similar_songs(target_song: Dict, catalog: List[Dict], top_n: int = 
         len(neighbors), target_song.get("title"), [s.get("title") for s in neighbors],
     )
     return neighbors
+
+
+def _sanitize_parsed_prefs(parsed: Dict, genres: List[str], moods: List[str]) -> Dict:
+    prefs: Dict = {}
+    lowered_genres = {g.lower(): g for g in genres}
+    lowered_moods = {m.lower(): m for m in moods}
+
+    genre = parsed.get("genre")
+    if isinstance(genre, str) and genre.lower() in lowered_genres:
+        prefs["genre"] = lowered_genres[genre.lower()]
+
+    mood = parsed.get("mood")
+    if isinstance(mood, str) and mood.lower() in lowered_moods:
+        prefs["mood"] = lowered_moods[mood.lower()]
+
+    energy = parsed.get("energy")
+    prefs["energy"] = max(0.0, min(1.0, float(energy))) if isinstance(energy, (int, float)) else 0.5
+
+    likes_acoustic = parsed.get("likes_acoustic")
+    if isinstance(likes_acoustic, bool):
+        prefs["likes_acoustic"] = likes_acoustic
+
+    return prefs
+
+
+def _fallback_parse_request(text: str, genres: List[str], moods: List[str]) -> Dict:
+    """
+    Deterministic keyword/synonym matching, used when no API key/package is
+    available or the LLM call fails. Only ever assigns genre/mood values
+    that are actually in the catalog, so scoring can't be handed a value
+    that can never match anything.
+    """
+    lowered = text.lower()
+    prefs: Dict = {}
+
+    for genre in genres:
+        if genre.lower() in lowered:
+            prefs["genre"] = genre
+            break
+
+    for mood in moods:
+        if mood.lower() in lowered:
+            prefs["mood"] = mood
+            break
+
+    if "mood" not in prefs:
+        lowered_moods = {m.lower(): m for m in moods}
+        for word, catalog_mood in MOOD_SYNONYMS.items():
+            if word in lowered and catalog_mood in lowered_moods.values():
+                prefs["mood"] = catalog_mood
+                break
+
+    if any(w in lowered for w in LOW_ENERGY_WORDS):
+        prefs["energy"] = 0.25
+    elif any(w in lowered for w in HIGH_ENERGY_WORDS):
+        prefs["energy"] = 0.85
+    else:
+        prefs["energy"] = 0.5
+
+    if "acoustic" in lowered:
+        prefs["likes_acoustic"] = True
+
+    logger.info("Keyword-parsed NL request '%s' -> %s", text, prefs)
+    return prefs
+
+
+def parse_user_request(text: str, songs: List[Dict]) -> Dict:
+    """
+    Natural-language front door: turns a free-text request like
+    "I want calm music for studying" into structured preferences. Grounds
+    the LLM's extraction in the catalog's actual genre/mood vocabulary so
+    it can't return a value that will never match anything downstream.
+    Falls back to deterministic keyword/synonym matching if no API key,
+    the package is missing, or the call fails.
+    """
+    genres = sorted({s.get("genre") for s in songs if s.get("genre")})
+    moods = sorted({s.get("mood") for s in songs if s.get("mood")})
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not set; using keyword parsing for NL request")
+        return _fallback_parse_request(text, genres, moods)
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.warning("google-genai package not installed; using keyword parsing for NL request")
+        return _fallback_parse_request(text, genres, moods)
+
+    prompt = (
+        "Extract music preferences from the user's request. Reply with JSON only, "
+        "no prose, no markdown fences. Schema: "
+        '{"genre": string or null, "mood": string or null, '
+        '"energy": number between 0.0 and 1.0 or null, "likes_acoustic": boolean or null}. '
+        f"Choose \"genre\" ONLY from this list, or null if none fit: {genres}. "
+        f"Choose \"mood\" ONLY from this list, or null if none fit: {moods}. "
+        "Infer \"energy\" from context (e.g. calm/study/relaxing implies low energy, "
+        "workout/hype/party implies high energy), or null if unclear. "
+        "Infer \"likes_acoustic\" only if clearly implied, else null.\n\n"
+        f"User request: {text!r}"
+    )
+
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=15000))
+            response = client.models.generate_content(
+                model=DEFAULT_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(max_output_tokens=150, temperature=0.0),
+            )
+            raw = (response.text or "").strip()
+            raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            parsed = json.loads(raw)
+            prefs = _sanitize_parsed_prefs(parsed, genres, moods)
+            logger.info("Parsed NL request '%s' via %s -> %s", text, DEFAULT_MODEL, prefs)
+            return prefs
+        except Exception as exc:  # guardrail: bad JSON, API failure, etc. must degrade, never crash
+            last_error = exc
+            logger.warning("NL parse attempt %d/2 failed: %s", attempt + 1, exc)
+
+    logger.error("Falling back to keyword parsing after NL parse failures: %s", last_error)
+    return _fallback_parse_request(text, genres, moods)
 
 
 def _fallback_explanation(song: Dict, reasons: List[str], similar_songs: List[Dict]) -> str:
